@@ -50,10 +50,36 @@ var tcpCmd = &cobra.Command{
 			Host:   net.JoinHostPort(dstHostname, "443"),
 		}
 		connectionAttempts := []string{dstHostname}
+		var tlsConfig *tls.Config
 		if tcpCmdOptions.pomeriumURL != "" {
 			connectionAttempts = strings.Split(tcpCmdOptions.pomeriumURL, ",")
+
+			for _, x := range connectionAttempts {
+				pomeriumURL, err = url.Parse(x)
+				if err != nil {
+					return fmt.Errorf("invalid pomerium URL: %w", err)
+				}
+				if !strings.Contains(pomeriumURL.Host, ":") {
+					if pomeriumURL.Scheme == "https" {
+						pomeriumURL.Host = net.JoinHostPort(pomeriumURL.Hostname(), "443")
+					} else {
+						pomeriumURL.Host = net.JoinHostPort(pomeriumURL.Hostname(), "80")
+					}
+				}
+
+				if pomeriumURL.Scheme == "https" {
+					tlsConfig = getTLSConfig()
+				}
+
+				// Test if service is reachble
+				timeout := 1 * time.Second
+				_, err := net.DialTimeout("tcp",pomeriumURL.Host, timeout)
+				if err != nil {
+					fmt.Println("Site unreachable, error: ", err)
+					continue
+				}
+			}
 		}
-		//fmt.Println(connectionAttempts)
 
 		l := zerolog.New(zerolog.NewConsoleWriter(func(w *zerolog.ConsoleWriter) {
 			w.Out = os.Stderr
@@ -68,50 +94,20 @@ var tcpCmd = &cobra.Command{
 			cancel()
 		}()
 
-		fmt.Println(connectionAttempts)
+		tun := tcptunnel.New(
+			tcptunnel.WithDestinationHost(dstHost),
+			tcptunnel.WithProxyHost(pomeriumURL.Host),
+			tcptunnel.WithTLSConfig(tlsConfig),
+		)
 
-		for _, x := range connectionAttempts {
-
-			pomeriumURL, err = url.Parse(x)
-			if err != nil {
-				return fmt.Errorf("invalid pomerium URL: %w", err)
-			}
-			if !strings.Contains(pomeriumURL.Host, ":") {
-				if pomeriumURL.Scheme == "https" {
-					pomeriumURL.Host = net.JoinHostPort(pomeriumURL.Hostname(), "443")
-				} else {
-					pomeriumURL.Host = net.JoinHostPort(pomeriumURL.Hostname(), "80")
-				}
-			}
-	
-			var tlsConfig *tls.Config
-			if pomeriumURL.Scheme == "https" {
-				tlsConfig = getTLSConfig()
-			}
-
-			// Test if service is reachble
-			timeout := 1 * time.Second
-			_, err := net.DialTimeout("tcp",pomeriumURL.Host, timeout)
-			if err != nil {
-				fmt.Println("Site unreachable, error: ", err)
-				continue
-			}
-
-			tun := tcptunnel.New(
-				tcptunnel.WithDestinationHost(dstHost),
-				tcptunnel.WithProxyHost(pomeriumURL.Host),
-				tcptunnel.WithTLSConfig(tlsConfig),
-			)
-
-			if tcpCmdOptions.listen == "-" {
-				err = tun.Run(ctx, readWriter{Reader: os.Stdin, Writer: os.Stdout})
-			} else {
-				err = tun.RunListener(ctx, tcpCmdOptions.listen)
-			}
-			if err != nil {
-				_, _ = fmt.Fprintf(os.Stderr, "%s\n", err.Error())
-				os.Exit(1)
-			}
+		if tcpCmdOptions.listen == "-" {
+			err = tun.Run(ctx, readWriter{Reader: os.Stdin, Writer: os.Stdout})
+		} else {
+			err = tun.RunListener(ctx, tcpCmdOptions.listen)
+		}
+		if err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "%s\n", err.Error())
+			os.Exit(1)
 		}
 
 		return nil
