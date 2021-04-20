@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
@@ -48,24 +49,11 @@ var tcpCmd = &cobra.Command{
 			Scheme: "https",
 			Host:   net.JoinHostPort(dstHostname, "443"),
 		}
+		connectionAttempts := []string{dstHostname}
 		if tcpCmdOptions.pomeriumURL != "" {
-			pomeriumURL, err = url.Parse(tcpCmdOptions.pomeriumURL)
-			if err != nil {
-				return fmt.Errorf("invalid pomerium URL: %w", err)
-			}
-			if !strings.Contains(pomeriumURL.Host, ":") {
-				if pomeriumURL.Scheme == "https" {
-					pomeriumURL.Host = net.JoinHostPort(pomeriumURL.Hostname(), "443")
-				} else {
-					pomeriumURL.Host = net.JoinHostPort(pomeriumURL.Hostname(), "80")
-				}
-			}
+			connectionAttempts = strings.Split(tcpCmdOptions.pomeriumURL, ",")
 		}
-
-		var tlsConfig *tls.Config
-		if pomeriumURL.Scheme == "https" {
-			tlsConfig = getTLSConfig()
-		}
+		//fmt.Println(connectionAttempts)
 
 		l := zerolog.New(zerolog.NewConsoleWriter(func(w *zerolog.ConsoleWriter) {
 			w.Out = os.Stderr
@@ -80,20 +68,50 @@ var tcpCmd = &cobra.Command{
 			cancel()
 		}()
 
-		tun := tcptunnel.New(
-			tcptunnel.WithDestinationHost(dstHost),
-			tcptunnel.WithProxyHost(pomeriumURL.Host),
-			tcptunnel.WithTLSConfig(tlsConfig),
-		)
+		fmt.Println(connectionAttempts)
 
-		if tcpCmdOptions.listen == "-" {
-			err = tun.Run(ctx, readWriter{Reader: os.Stdin, Writer: os.Stdout})
-		} else {
-			err = tun.RunListener(ctx, tcpCmdOptions.listen)
-		}
-		if err != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "%s\n", err.Error())
-			os.Exit(1)
+		for _, x := range connectionAttempts {
+
+			pomeriumURL, err = url.Parse(x)
+			if err != nil {
+				return fmt.Errorf("invalid pomerium URL: %w", err)
+			}
+			if !strings.Contains(pomeriumURL.Host, ":") {
+				if pomeriumURL.Scheme == "https" {
+					pomeriumURL.Host = net.JoinHostPort(pomeriumURL.Hostname(), "443")
+				} else {
+					pomeriumURL.Host = net.JoinHostPort(pomeriumURL.Hostname(), "80")
+				}
+			}
+	
+			var tlsConfig *tls.Config
+			if pomeriumURL.Scheme == "https" {
+				tlsConfig = getTLSConfig()
+			}
+
+			// Test if service is reachble
+			timeout := 1 * time.Second
+			_, err := net.DialTimeout("tcp",pomeriumURL.Host, timeout)
+			if err != nil {
+				fmt.Println("Site unreachable, error: ", err)
+				continue
+			}
+
+			tun := tcptunnel.New(
+				tcptunnel.WithDestinationHost(dstHost),
+				tcptunnel.WithProxyHost(pomeriumURL.Host),
+				tcptunnel.WithTLSConfig(tlsConfig),
+			)
+
+			if tcpCmdOptions.listen == "-" {
+				err = tun.Run(ctx, readWriter{Reader: os.Stdin, Writer: os.Stdout})
+			} else {
+				err = tun.RunListener(ctx, tcpCmdOptions.listen)
+			}
+			if err != nil {
+				_, _ = fmt.Fprintf(os.Stderr, "%s\n", err.Error())
+				os.Exit(1)
+			}
 		}
 
 		return nil
